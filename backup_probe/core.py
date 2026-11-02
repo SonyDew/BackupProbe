@@ -53,7 +53,7 @@ def archive_name(name):
 
 
 def add_member(name, size, seen, state, limits):
-    key = archive_name(name)
+    key = archive_name(name).casefold()
     if key in seen:
         raise ProbeFailure("duplicate_member")
     seen.add(key)
@@ -95,9 +95,9 @@ def check_zip(path, state, limits):
                 if item.is_dir():
                     if item.file_size or item.compress_size or item.CRC:
                         raise ProbeFailure("invalid_directory")
-                    continue
-                if kind == stat.S_IFDIR:
+                elif kind == stat.S_IFDIR:
                     raise ProbeFailure("invalid_directory")
+                # Opening directories also validates their local ZIP headers.
                 with archive.open(item) as stream:
                     read_member(stream, item.file_size, state, limits)
     except (zipfile.BadZipFile, zipfile.LargeZipFile, EOFError, RuntimeError, ValueError,
@@ -120,37 +120,34 @@ def check_tar(path, state, limits):
                     raise ProbeFailure("invalid_tar")
                 with stream:
                     read_member(stream, item.size, state, limits)
-        # tarfile accepts archives without the two required zero blocks at
-        # EOF. Check the complete stream, including compression trailers.
+            # The next two 512-byte blocks must be zero. All remaining
+            # record padding must also be zero, not just the final 1024 bytes.
+            terminator_offset = archive.offset
+
         with path.open("rb") as source:
             magic = source.read(6)
         opener = (gzip.open if magic.startswith(b"\x1f\x8b") else
                   bz2.open if magic.startswith(b"BZh") else
                   lzma.open if magic == b"\xfd7zXZ\x00" else None)
-        if opener:
-            maximum = limits["total"] + 4096 * limits["entries"] + 10240
-            count = 0
-            tail = b""
-            with opener(path, "rb") as decoded:
-                while True:
-                    block = decoded.read(min(CHUNK, maximum - count + 1))
-                    if not block:
-                        break
-                    count += len(block)
-                    if count > maximum:
-                        raise ProbeFailure("tar_stream_limit")
-                    tail = (tail + block)[-1024:]
-            if count < 1024 or count % 512 or tail != bytes(1024):
-                raise ProbeFailure("invalid_tar_terminator")
-        else:
-            size = path.stat().st_size
-            if size < 1024 or size % 512:
-                raise ProbeFailure("invalid_tar_terminator")
-            with path.open("rb") as source:
-                source.seek(-1024, 2)
-                if source.read(1024) != bytes(1024):
-                    raise ProbeFailure("invalid_tar_terminator")
-    except (tarfile.TarError, EOFError, OSError, ValueError, lzma.LZMAError) as exc:
+        maximum = limits["total"] + 4096 * limits["entries"] + 10240
+        count = 0
+        with (opener(path, "rb") if opener else path.open("rb")) as decoded:
+            while True:
+                block = decoded.read(min(CHUNK, maximum - count + 1) if opener else CHUNK)
+                if not block:
+                    break
+                end = count + len(block)
+                if opener and end > maximum:
+                    raise ProbeFailure("tar_stream_limit")
+                if end > terminator_offset:
+                    suffix = block[max(0, terminator_offset - count):]
+                    if any(suffix):
+                        raise ProbeFailure("invalid_tar_terminator")
+                count = end
+        if count < terminator_offset + 1024 or count % 512:
+            raise ProbeFailure("invalid_tar_terminator")
+    except (tarfile.TarError, EOFError, OSError, ValueError, zlib.error,
+            lzma.LZMAError) as exc:
         raise ProbeFailure("invalid_tar") from exc
 
 
