@@ -234,5 +234,99 @@ class BackupProbeTests(unittest.TestCase):
         self.assertEqual(json.loads(p.stdout)["results"][0]["status"], "ok")
 
 
+    def test_tar_missing_end_markers(self):
+        self.tar()
+        p = self.root / "data.tar"
+        p.write_bytes(p.read_bytes()[:1024])
+        self.assertEqual(self.probe("data.tar")["issue"], "invalid_tar_terminator")
+
+    def test_tar_truncated_padding(self):
+        self.tar()
+        p = self.root / "data.tar"
+        p.write_bytes(p.read_bytes()[:-1])
+        self.assertEqual(self.probe("data.tar")["issue"], "invalid_tar_terminator")
+
+    def test_tar_nonzero_trailing_padding(self):
+        self.tar()
+        p = self.root / "data.tar"
+        raw = bytearray(p.read_bytes())
+        raw[-1] = 42
+        p.write_bytes(raw)
+        self.assertEqual(self.probe("data.tar")["issue"], "invalid_tar_terminator")
+
+    def test_compressed_tar_missing_end_markers(self):
+        import bz2
+        import gzip
+        import lzma
+        self.tar()
+        raw = (self.root / "data.tar").read_bytes()[:1024]
+        for extension, compress in (("gz", gzip.compress), ("bz2", bz2.compress), ("xz", lzma.compress)):
+            with self.subTest(extension=extension):
+                name = f"bad.tar.{extension}"
+                (self.root / name).write_bytes(compress(raw))
+                self.assertEqual(self.probe(name)["issue"], "invalid_tar_terminator")
+
+    def test_zip_directory_crc_tampering(self):
+        with zipfile.ZipFile(self.root / "data.zip", "w") as z:
+            z.writestr("dir/", b"")
+        p = self.root / "data.zip"
+        raw = bytearray(p.read_bytes())
+        central = raw.index(b"PK\x01\x02")
+        raw[central + 16] = 1
+        p.write_bytes(raw)
+        self.assertEqual(self.probe("data.zip")["issue"], "invalid_directory")
+
+    def test_zip_directory_compressed_size_tampering(self):
+        with zipfile.ZipFile(self.root / "data.zip", "w") as z:
+            z.writestr("dir/", b"")
+        p = self.root / "data.zip"
+        raw = bytearray(p.read_bytes())
+        central = raw.index(b"PK\x01\x02")
+        raw[central + 20] = 1
+        p.write_bytes(raw)
+        self.assertEqual(self.probe("data.zip")["issue"], "invalid_directory")
+
+    def test_windows_unsafe_member_names(self):
+        for name in ("CON", "con.txt", "folder/NUL.log", "COM1", "LPT9.txt",
+                     "a:stream", "a/b:c", "folder/trailing.", "folder/trailing ", "a\nb"):
+            with self.subTest(name=name), self.assertRaises(Exception):
+                archive_name(name)
+
+    def test_portable_member_names(self):
+        for name in ("folder/a.txt", "a-b", "company.txt", "com10", "file name.txt"):
+            with self.subTest(name=name):
+                self.assertEqual(archive_name(name), name)
+
+    def test_tar_windows_device_member(self):
+        self.tar(entries={"folder/CON.txt": b"data"})
+        self.assertEqual(self.probe("data.tar")["issue"], "unsafe_member")
+
+    def test_cli_mixed_result_precedence_and_privacy(self):
+        self.zip(name="broken-secret.zip", entries={"../private-token": b"x"})
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = main([str(self.root / "broken-secret.zip"), str(self.root / "missing-secret.zip"), "--json"])
+        self.assertEqual(code, 2)
+        data = json.loads(output.getvalue())
+        self.assertEqual([item["status"] for item in data["results"]], ["failed", "error"])
+        self.assertNotIn("secret", output.getvalue())
+        self.assertNotIn("private-token", output.getvalue())
+
+    def test_cli_invalid_limits(self):
+        for flag, value in (("--max-input-bytes", "0"), ("--max-total-bytes", "-1"),
+                            ("--sqlite-timeout", "nan"), ("--sqlite-timeout", "inf")):
+            with self.subTest(flag=flag, value=value):
+                error = io.StringIO()
+                with contextlib.redirect_stderr(error), self.assertRaises(SystemExit) as ctx:
+                    main(["missing.zip", flag, value])
+                self.assertEqual(ctx.exception.code, 2)
+                self.assertNotIn("missing.zip", error.getvalue())
+
+    def test_empty_tar_is_valid(self):
+        with tarfile.open(self.root / "empty.tar", "w"):
+            pass
+        self.assertEqual(self.probe("empty.tar")["status"], "ok")
+
+
 if __name__ == "__main__":
     unittest.main()
