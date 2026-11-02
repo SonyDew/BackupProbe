@@ -139,9 +139,13 @@ class EveningRegressionTests(unittest.TestCase):
 
     def test_sqlite_read_only(self):
         p = self.root / "data.sqlite"
-        with sqlite3.connect(p) as db:
+        db = sqlite3.connect(p)
+        try:
             db.execute("CREATE TABLE items (id INTEGER)")
             db.execute("INSERT INTO items VALUES (1)")
+            db.commit()
+        finally:
+            db.close()
         before = (p.read_bytes(), p.stat().st_mtime_ns)
         self.assertEqual(self.probe(p.name, "sqlite")["status"], "ok")
         self.assertEqual((p.read_bytes(), p.stat().st_mtime_ns), before)
