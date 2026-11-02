@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "backup-probe"
+version = "0.1.0"
+description = "Read-only checks for ZIP, TAR and SQLite backups"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+dependencies = []
+
+[project.scripts]
+backup-probe = "backup_probe.core:main"
+
+[tool.setuptools.packages.find]
+include = ["backup_probe*"]
