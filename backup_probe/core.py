@@ -40,6 +40,15 @@ def archive_name(name):
     parts = [part for part in name.split("/") if part not in ("", ".")]
     if not parts:
         raise ProbeFailure("unsafe_member")
+    # Reject names that are not portable to Windows, including device names
+    # with extensions and NTFS alternate data streams.
+    reserved = {"CON", "PRN", "AUX", "NUL"}
+    reserved.update(f"{prefix}{number}" for prefix in ("COM", "LPT") for number in range(1, 10))
+    for part in parts:
+        if (":" in part or part.endswith((".", " "))
+                or any(ord(char) < 32 for char in part)
+                or part.split(".", 1)[0].upper() in reserved):
+            raise ProbeFailure("unsafe_member")
     return "/".join(parts)
 
 
@@ -84,7 +93,7 @@ def check_zip(path, state, limits):
                 if item.flag_bits & 1:
                     raise ProbeFailure("encrypted_member")
                 if item.is_dir():
-                    if item.file_size:
+                    if item.file_size or item.compress_size or item.CRC:
                         raise ProbeFailure("invalid_directory")
                     continue
                 if kind == stat.S_IFDIR:
@@ -111,8 +120,8 @@ def check_tar(path, state, limits):
                     raise ProbeFailure("invalid_tar")
                 with stream:
                     read_member(stream, item.size, state, limits)
-        # tarfile stops at the TAR end marker and may not read the compression
-        # trailer. Drain compressed streams to verify their checksums.
+        # tarfile accepts archives without the two required zero blocks at
+        # EOF. Check the complete stream, including compression trailers.
         with path.open("rb") as source:
             magic = source.read(6)
         opener = (gzip.open if magic.startswith(b"\x1f\x8b") else
@@ -121,6 +130,7 @@ def check_tar(path, state, limits):
         if opener:
             maximum = limits["total"] + 4096 * limits["entries"] + 10240
             count = 0
+            tail = b""
             with opener(path, "rb") as decoded:
                 while True:
                     block = decoded.read(min(CHUNK, maximum - count + 1))
@@ -129,6 +139,17 @@ def check_tar(path, state, limits):
                     count += len(block)
                     if count > maximum:
                         raise ProbeFailure("tar_stream_limit")
+                    tail = (tail + block)[-1024:]
+            if count < 1024 or count % 512 or tail != bytes(1024):
+                raise ProbeFailure("invalid_tar_terminator")
+        else:
+            size = path.stat().st_size
+            if size < 1024 or size % 512:
+                raise ProbeFailure("invalid_tar_terminator")
+            with path.open("rb") as source:
+                source.seek(-1024, 2)
+                if source.read(1024) != bytes(1024):
+                    raise ProbeFailure("invalid_tar_terminator")
     except (tarfile.TarError, EOFError, OSError, ValueError, lzma.LZMAError) as exc:
         raise ProbeFailure("invalid_tar") from exc
 
