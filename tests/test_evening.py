@@ -2,9 +2,7 @@
 import gzip
 import io
 import json
-import os
 import sqlite3
-import stat
 import subprocess
 import sys
 import tarfile
@@ -13,7 +11,7 @@ import unittest
 import zipfile
 from pathlib import Path
 
-from backup_probe.core import inspect, main
+from backup_probe.core import inspect
 
 LIMITS = {"input": 2**31, "member": 2**29, "total": 2**31, "entries": 10000}
 
